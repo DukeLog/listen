@@ -1,6 +1,6 @@
 pkgbase = listen
 	pkgdesc = Minimal audio transcription tool - 100% on-premise
-	pkgver = 1.1.3
+	pkgver = 1.2.3
 	pkgrel = 1
 	url = https://github.com/gmoqa/listen
 	arch = any
@@ -11,7 +11,7 @@ pkgbase = listen
 	depends = python-sounddevice
 	depends = portaudio
 	depends = ffmpeg
-	source = listen-1.1.3.tar.gz::https://github.com/gmoqa/listen/archive/refs/tags/v1.1.3.tar.gz
-	sha256sums = 16fd654625f1c52354bfc21b9c24b0bcc83700ae10a98acc717be1bfb40a4f35
+	source = listen-1.2.3.tar.gz::https://github.com/gmoqa/listen/archive/refs/tags/v1.2.3.tar.gz
+	sha256sums = 314d8b3ee553b5b54746dd98d8d6c18f913125f5fada0c55d1de9d9265eb3a16
 
 pkgname = listen
