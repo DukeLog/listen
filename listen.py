@@ -60,9 +60,10 @@ def kbd_listen(q):
 
 
 def draw(c, bars, txt='Listening'):
-    if is_tty:
-        sys.stdout.write(f'\r{RED}●{RST} {txt}  [{c}{bars}{RST}]')
-        sys.stdout.flush()
+    # Always show UI on stderr when not TTY (piped), or stdout when TTY
+    out = sys.stderr if not is_tty else sys.stdout
+    out.write(f'\r{RED}●{RST} {txt}  [{c}{bars}{RST}]')
+    out.flush()
 
 
 def record(start_proc):
@@ -85,12 +86,13 @@ def record(start_proc):
     threading.Thread(target=kbd_listen, args=(q,), daemon=True).start()
     draw('', ' ' * 10)
 
-    if first_run and is_tty:
+    if first_run and stdin_is_tty:
         time.sleep(0.3)
         print(f'\n\n  Press SPACE to stop recording\n', file=sys.stderr)
         time.sleep(1.5)
-        sys.stdout.write(HOME)
-        sys.stdout.flush()
+        out = sys.stderr if not is_tty else sys.stdout
+        out.write(HOME)
+        out.flush()
         draw('', ' ' * 10)
 
     log('Starting audio stream (16kHz, mono)')
@@ -195,9 +197,10 @@ def main():
         with open(marker, 'w') as f:
             f.write('')
 
-    if is_tty:
-        sys.stdout.write(HOME)
-        sys.stdout.flush()
+    # Clear screen on the appropriate stream
+    out = sys.stderr if not is_tty else sys.stdout
+    out.write(HOME)
+    out.flush()
 
     lang = 'en'
     mdl = 'base'
@@ -251,8 +254,10 @@ def main():
 
     try:
         r = transcribe(tmp.name, mdl, lang, run, blink_state)
-        if is_tty:
-            sys.stdout.write('\r' + CLR)
+        # Clear the UI line on the appropriate stream
+        out = sys.stderr if not is_tty else sys.stdout
+        out.write('\r' + CLR)
+        out.flush()
         log(f'Final transcription: "{r["text"].strip()}"')
         print(r['text'].strip(), flush=True)
     except Exception as e:
