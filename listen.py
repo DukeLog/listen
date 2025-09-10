@@ -204,16 +204,19 @@ def main():
 
     lang = 'en'
     mdl = 'base'
+    claude_prompt = None
 
     for i, a in enumerate(sys.argv[1:]):
         if a in ['-l', '--language'] and i + 2 < len(sys.argv):
             lang = sys.argv[i + 2]
         elif a in ['-m', '--model'] and i + 2 < len(sys.argv):
             mdl = sys.argv[i + 2]
+        elif a in ['-c', '--claude'] and i + 2 < len(sys.argv):
+            claude_prompt = sys.argv[i + 2]
         elif a in ['-v', '--verbose']:
             verbose = True
         elif a in ['-h', '--help']:
-            print("usage: listen [-l LANG] [-m MODEL] [-v]\nPress SPACE to stop")
+            print("usage: listen [-l LANG] [-m MODEL] [-c PROMPT] [-v]\nPress SPACE to stop")
             return
 
     log(f'Starting listen (language={lang}, model={mdl})')
@@ -259,7 +262,23 @@ def main():
         out.write('\r' + CLR)
         out.flush()
         log(f'Final transcription: "{r["text"].strip()}"')
-        print(r['text'].strip(), flush=True)
+
+        text = r['text'].strip()
+
+        if claude_prompt:
+            # Send to claude with the prompt
+            import subprocess
+            log(f'Sending to claude with prompt: "{claude_prompt}"')
+            try:
+                subprocess.run(['claude', '-p', claude_prompt], input=text, text=True, check=True)
+            except FileNotFoundError:
+                print(f'Error: claude command not found. Install Claude CLI first.', file=sys.stderr)
+                sys.exit(1)
+            except subprocess.CalledProcessError as e:
+                print(f'Error running claude: {e}', file=sys.stderr)
+                sys.exit(1)
+        else:
+            print(text, flush=True)
     except Exception as e:
         log(f'Transcription error: {e}')
         sys.exit(1)
