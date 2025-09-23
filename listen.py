@@ -12,6 +12,7 @@ CLR = '\033[K'
 HOME = '\033[2J\033[H'
 RED = '\033[91m'
 YEL = '\033[93m'
+MAG = '\033[95m'  # Magenta/Purple
 RST = '\033[0m'
 
 # Audio configuration
@@ -94,10 +95,11 @@ def kbd_listen(q):
         pass
 
 
-def draw(c, bars, txt='Listening'):
+def draw(c, bars, txt='Listening', hint=''):
     # Always show UI on stderr when not TTY (piped), or stdout when TTY
     out = sys.stderr if not is_tty else sys.stdout
-    out.write(f'\r{RED}●{RST} {txt}  [{c}{bars}{RST}]')
+    hint_str = f'  {MAG}{hint}{RST}' if hint else ''
+    out.write(f'\r{RED}●{RST} {txt}  [{c}{bars}{RST}]{hint_str}')
     out.flush()
 
 
@@ -122,39 +124,17 @@ def record(start_proc):
         log('Starting keyboard listener thread')
         threading.Thread(target=kbd_listen, args=(q,), daemon=True).start()
 
-    draw('', ' ' * 10)
-
-    if first_run and stdin_is_tty and not signal_mode:
-        time.sleep(0.3)
-        print(f'\n\n  Press SPACE to stop recording', file=sys.stderr)
-        # Hint for Termux/mobile users
-        if os.getenv('PREFIX'):  # Termux environment
-            print(f'  Tip: Use --vad 2 for auto-stop on silence\n', file=sys.stderr)
-        else:
-            print(f'', file=sys.stderr)
-        time.sleep(1.5)
-        out = sys.stderr if not is_tty else sys.stdout
-        out.write(HOME)
-        out.flush()
-        draw('', ' ' * 10)
-    elif signal_mode:
-        # Print signal mode instructions
+    # Determine hint message based on mode
+    hint = ''
+    if signal_mode:
         pid = os.getpid()
-        print(f'\n\n  Signal mode: Send SIGUSR1 to stop (pid: {pid})\n', file=sys.stderr)
-        print(f'  Example: kill -SIGUSR1 {pid}\n', file=sys.stderr)
-        time.sleep(1.5)
-        out = sys.stderr if not is_tty else sys.stdout
-        out.write(HOME)
-        out.flush()
-        draw('', ' ' * 10)
+        hint = f'Signal mode: kill -SIGUSR1 {pid}'
     elif vad_enabled:
-        # Print VAD mode instructions
-        print(f'\n\n  VAD mode: Will stop after {vad_silence_duration}s of silence\n', file=sys.stderr)
-        time.sleep(1.5)
-        out = sys.stderr if not is_tty else sys.stdout
-        out.write(HOME)
-        out.flush()
-        draw('', ' ' * 10)
+        hint = f'VAD mode: auto-stop after {vad_silence_duration}s silence'
+    elif first_run and stdin_is_tty:
+        hint = 'Press SPACE to stop'
+
+    draw('', ' ' * 10, hint=hint)
 
     log(f'Starting audio stream ({SAMPLE_RATE//1000}kHz, {"stereo" if CHANNELS == 2 else "mono"})')
     # In signal mode or VAD mode, no timeout - wait for signal/silence
@@ -169,7 +149,7 @@ def record(start_proc):
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE, callback=audio_cb):
             t0 = time.time()
             while True:
-                draw('', '=' * min(int(lvl[0] * 200), 10) + ' ' * max(10 - int(lvl[0] * 200), 0))
+                draw('', '=' * min(int(lvl[0] * 200), 10) + ' ' * max(10 - int(lvl[0] * 200), 0), hint=hint)
 
                 # Check signal stop (for signal mode)
                 if signal_mode and signal_stop[0]:
