@@ -768,7 +768,11 @@ def main():
                 output_transcription(text, lang, mdl)
         except Exception as e:
             log(f'Transcription error: {e}')
-            print(f'Error: {e}', file=sys.stderr)
+            if verbose:
+                import traceback
+                traceback.print_exc()
+            else:
+                print(f'Error: {e}', file=sys.stderr)
             sys.exit(1)
         finally:
             run[0] = False
@@ -849,6 +853,11 @@ def main():
             output_transcription(text, lang, mdl)
     except Exception as e:
         log(f'Transcription error: {e}')
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        else:
+            print(f'Error: {e}', file=sys.stderr)
         sys.exit(1)
     finally:
         run[0] = False
@@ -860,4 +869,14 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception as e:
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        else:
+            print(f'Error: {e}', file=sys.stderr)
+        sys.exit(1)
