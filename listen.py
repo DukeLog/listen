@@ -243,7 +243,7 @@ def main():
         if is_tty:
             sys.stdout.write('\r' + CLR)
         log(f'Final transcription: "{r["text"].strip()}"')
-        print(r['text'].strip())
+        print(r['text'].strip(), flush=True)
     except Exception as e:
         log(f'Transcription error: {e}')
         sys.exit(1)
