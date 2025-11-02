@@ -17,6 +17,7 @@ pct = [0.0]
 verbose = False
 first_run = True
 is_tty = sys.stdout.isatty()
+stdin_is_tty = sys.stdin.isatty()
 
 def log(msg):
     if verbose:
@@ -30,6 +31,9 @@ def audio_cb(data, frames, t, status):
 
 
 def kbd_listen(q):
+    if not stdin_is_tty:
+        return
+
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     flg = fcntl.fcntl(fd, fcntl.F_GETFL)
@@ -90,11 +94,18 @@ def record(start_proc):
         draw('', ' ' * 10)
 
     log('Starting audio stream (16kHz, mono)')
+    timeout = 10 if not stdin_is_tty else None
     try:
         with sd.InputStream(samplerate=16000, channels=1, dtype='float32', callback=audio_cb):
             t0 = time.time()
             while True:
                 draw('', '=' * min(int(lvl[0] * 200), 10) + ' ' * max(10 - int(lvl[0] * 200), 0))
+
+                # Check timeout when piped
+                if timeout and (time.time() - t0) >= timeout:
+                    log(f'Recording stopped after timeout ({timeout}s)')
+                    break
+
                 try:
                     if q.get_nowait():
                         dur = time.time() - t0
