@@ -44,6 +44,27 @@ listen -v           # verbose mode
 
 press SPACE to stop recording
 
+### configuration
+
+**set defaults (persistent)**
+```sh
+listen config -l es         # set spanish as default language
+listen config -m tiny       # set tiny model as default
+listen config --vad 3       # enable VAD with 3s silence
+listen config --show        # view current config
+listen config --reset       # delete config file
+```
+
+configuration is saved to `~/.listen/config.json`
+
+**precedence**: CLI args > config file > defaults
+
+```sh
+listen config -l es -m tiny  # save defaults
+listen                       # uses: es, tiny (from config)
+listen -l en                 # uses: en (override), tiny (from config)
+```
+
 ### advanced modes
 
 **auto-stop with silence detection**
