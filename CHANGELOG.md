@@ -4,12 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.1] - 2025-01-04
+
 ### Added
 - **Scripting mode flags** - Perfect for automation and workflows
   - `-q/--quiet` - Suppress UI, output only transcription text
   - `-j/--json` - Output in JSON format with metadata
   - `--clipboard` - Auto-copy transcription to clipboard (macOS/Linux/Windows)
   - `-o/--output FILE` - Write transcription to file
+- Multi-platform clipboard support (macOS/Linux/Windows)
+- Proper stdout/stderr separation for pipe-friendly output
+
+### Changed
+- Updated README with scripting/automation examples
+- UI output now goes to stderr, transcription to stdout
 
 ## [1.2.0] - 2025-01-04
 
