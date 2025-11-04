@@ -1,37 +1,53 @@
 #!/bin/bash
+set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="/usr/local/bin"
-VENV_DIR="$SCRIPT_DIR/venv"
+INSTALL_DIR="$HOME/.local/bin"
+APP_DIR="$HOME/.local/share/listen"
 
-echo "🔧 Instalando comando 'listen'..."
+echo "Installing listen..."
 
-if [ ! -d "$VENV_DIR" ]; then
-    echo "⚠️  No se encontró el entorno virtual. Creándolo..."
-    python3 -m venv "$VENV_DIR"
-    source "$VENV_DIR/bin/activate"
-    pip install -r "$SCRIPT_DIR/requirements.txt"
-else
-    source "$VENV_DIR/bin/activate"
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$APP_DIR"
+
+if ! command -v python3 &> /dev/null; then
+    echo "Error: Python 3 is required but not installed."
+    echo "Install it from: https://www.python.org/downloads/"
+    exit 1
 fi
 
-echo "Creando wrapper script en $INSTALL_DIR/listen..."
-cat > "$INSTALL_DIR/listen" << EOF
+cp listen.py "$APP_DIR/"
+cp requirements.txt "$APP_DIR/"
+
+if [ ! -d "$APP_DIR/venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv "$APP_DIR/venv"
+    source "$APP_DIR/venv/bin/activate"
+    pip install --quiet --upgrade pip
+    pip install --quiet -r "$APP_DIR/requirements.txt"
+else
+    echo "Virtual environment already exists."
+fi
+
+cat > "$INSTALL_DIR/listen" << 'EOF'
 #!/bin/bash
-source "$VENV_DIR/bin/activate"
-exec python "$SCRIPT_DIR/listen.py" "\$@"
+source "$HOME/.local/share/listen/venv/bin/activate"
+exec python "$HOME/.local/share/listen/listen.py" "$@"
 EOF
 
 chmod +x "$INSTALL_DIR/listen"
-chmod +x "$SCRIPT_DIR/listen.py"
 
-echo "✅ Comando 'listen' instalado correctamente en $INSTALL_DIR"
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    echo ""
+    echo "Add this to your ~/.zshrc or ~/.bashrc:"
+    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo ""
+fi
+
+echo "✓ Installed successfully!"
 echo ""
-echo "Ahora puedes usar 'listen' desde cualquier directorio"
+echo "Usage:"
+echo "  listen           # record and transcribe (english)"
+echo "  listen -l es     # spanish"
+echo "  listen -m medium # better model"
 echo ""
-echo "Uso:"
-echo "  listen              # Grabar y transcribir en español"
-echo "  listen -l en        # Grabar y transcribir en inglés"
-echo "  listen -m medium    # Usar modelo más preciso"
-echo ""
-echo "Presiona ESPACIO para detener la grabación"
+echo "Press SPACE to stop recording"
