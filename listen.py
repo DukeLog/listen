@@ -15,6 +15,7 @@ rec = []
 lvl = [0.0]
 pct = [0.0]
 verbose = False
+first_run = True
 
 def log(msg):
     if verbose:
@@ -77,6 +78,14 @@ def record(start_proc):
     log('Starting keyboard listener thread')
     threading.Thread(target=kbd_listen, args=(q,), daemon=True).start()
     draw('', ' ' * 10)
+
+    if first_run:
+        time.sleep(0.3)
+        print(f'\n\n  Press SPACE to stop recording\n', file=sys.stderr)
+        time.sleep(1.5)
+        sys.stdout.write(HOME)
+        sys.stdout.flush()
+        draw('', ' ' * 10)
 
     log('Starting audio stream (16kHz, mono)')
     try:
@@ -163,7 +172,15 @@ def transcribe(path, model, lang, run, blink_state):
 
 
 def main():
-    global verbose
+    global verbose, first_run
+
+    marker = os.path.expanduser('~/.local/share/listen/.first_run_done')
+    if os.path.exists(marker):
+        first_run = False
+    else:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, 'w') as f:
+            f.write('')
 
     sys.stdout.write(HOME)
     sys.stdout.flush()
