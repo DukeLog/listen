@@ -2,6 +2,21 @@
 
 minimal audio transcription tool
 
+100% on-premise audio transcription using OpenAI Whisper. No API keys, no cloud services, no data leaves your device.
+
+## features
+
+- record from microphone and transcribe in real-time
+- transcribe audio files (mp3, wav, m4a, flac, ogg, etc.)
+- multiple language support
+- multiple stopping modes: manual (SPACE), auto (VAD), signal (SIGUSR1)
+- scripting support with JSON output and quiet mode
+- persistent configuration
+- HTTP API server mode
+- claude integration
+- clipboard support
+- works on macOS, Linux, Android (Termux)
+
 ## install
 
 ### homebrew (mac/linux)
@@ -33,16 +48,38 @@ curl -sSL https://raw.githubusercontent.com/gmoqa/listen/main/install.sh | bash
 
 ## usage
 
-### basic
+### basic recording
 ```sh
 listen              # record and transcribe (english)
 listen -l es        # spanish
+listen -l fr        # french
 listen -m medium    # better model
 listen -c           # send to claude
 listen -v           # verbose mode
 ```
 
-press SPACE to stop recording
+press SPACE to stop recording (default mode)
+
+### stopping modes
+
+**manual stop (default)**
+```sh
+listen              # press SPACE to stop
+```
+
+**auto-stop with silence detection (VAD)**
+```sh
+listen --vad 2      # stop after 2 seconds of silence
+listen --vad 3      # stop after 3 seconds of silence
+```
+
+**signal control (for scripts/automation)**
+```sh
+listen --signal-mode &
+PID=$!
+# do something...
+kill -SIGUSR1 $PID  # stop recording
+```
 
 ### file processing
 ```sh
@@ -56,25 +93,46 @@ supports: mp3, wav, m4a, flac, ogg, and other formats supported by ffmpeg
 
 ### scripting / automation
 ```sh
-listen -f audio.mp3 --quiet              # no UI, just text
-listen -f audio.mp3 --json               # JSON output
-listen -f audio.mp3 --clipboard          # copy to clipboard
-listen -f audio.mp3 -o transcript.txt    # save to file
+# output options
+listen --quiet                           # no UI, just text
+listen --json                            # JSON output
+listen --clipboard                       # copy to clipboard
+listen -o transcript.txt                 # save to file
 
-# combine flags
-listen -f audio.mp3 --quiet --json -o output.json
-listen --quiet --clipboard               # record & copy
+# combine flags for automation
+listen --quiet --json -o output.json     # silent JSON output
+listen --quiet --json --signal-mode      # for background recording
+listen --vad 2 --json                    # auto-stop with JSON
+```
+
+**example: background recording with signal**
+```sh
+listen --quiet --json --signal-mode -l es > output.json &
+PID=$!
+sleep 5  # record for 5 seconds
+kill -SIGUSR1 $PID
+wait $PID
+cat output.json
 ```
 
 ### configuration
 
 **set defaults (persistent)**
 ```sh
-listen config -l es         # set spanish as default language
-listen config -m tiny       # set tiny model as default
-listen config --vad 3       # enable VAD with 3s silence
-listen config --show        # view current config
-listen config --reset       # delete config file
+listen config -l es           # set spanish as default language
+listen config -m tiny         # set tiny model as default
+listen config --vad 3         # enable VAD with 3s silence
+listen config --signal-mode   # toggle signal mode on/off
+listen config --verbose       # toggle verbose mode
+listen config --claude        # toggle claude integration
+listen config --show          # view current config
+listen config --reset         # delete config file
+```
+
+**server configuration**
+```sh
+listen config --host 0.0.0.0  # set server host
+listen config --port 8080     # set server port
 ```
 
 configuration is saved to `~/.listen/config.json`
@@ -87,33 +145,34 @@ listen                       # uses: es, tiny (from config)
 listen -l en                 # uses: en (override), tiny (from config)
 ```
 
-### advanced modes
-
-**auto-stop with silence detection**
-```sh
-listen --vad 2      # stop after 2s of silence
-```
-
-**signal control (for scripts)**
-```sh
-listen --signal-mode &
-kill -SIGUSR1 $(pgrep -f "listen.*signal")
-```
-
-**http api server**
+### http api server
 ```sh
 listen -s                              # start server on :5000
 listen -s --port 8080 --host 127.0.0.1
+listen -s -m medium -l es              # server with specific model/language
+
+# test the server
+curl http://localhost:5000/health
 curl -X POST -F "audio=@file.mp3" http://localhost:5000/transcribe
+curl -X POST -F "audio=@file.mp3" -F "language=es" http://localhost:5000/transcribe
 ```
 
 ## models
 
-- tiny
-- base (default)
-- small
-- medium
-- large
+Available Whisper models (ordered by speed/accuracy tradeoff):
+
+| model | size | speed | accuracy | use case |
+|-------|------|-------|----------|----------|
+| tiny | ~75MB | fastest | lowest | quick tests, mobile |
+| base | ~150MB | fast | good | default, balanced |
+| small | ~500MB | medium | better | more accuracy needed |
+| medium | ~1.5GB | slow | high | production quality |
+| large | ~3GB | slowest | highest | maximum accuracy |
+
+**recommendations:**
+- development/testing: `tiny` or `base`
+- production: `small` or `medium`
+- mobile/termux: `tiny` (avoid medium/large due to memory)
 
 ## platform notes
 
@@ -186,7 +245,89 @@ open htmlcov/index.html  # mac
 xdg-open htmlcov/index.html  # linux
 ```
 
+## command reference
+
+### all flags
+
+**modes**
+```sh
+listen                    # default: record from microphone
+listen -f FILE            # transcribe audio file
+listen -s                 # start HTTP API server
+listen config             # manage configuration
+```
+
+**recording options**
+```sh
+-l, --language LANG       # language code (en, es, fr, de, etc.)
+-m, --model MODEL         # whisper model (tiny, base, small, medium, large)
+-c, --claude              # send transcription to claude
+-v, --verbose             # verbose debug output
+```
+
+**stopping modes**
+```sh
+# default: press SPACE to stop
+--vad SECONDS             # auto-stop after N seconds of silence
+--signal-mode             # stop with SIGUSR1 signal
+```
+
+**output options**
+```sh
+-q, --quiet               # no UI, only transcription text
+-j, --json                # output in JSON format
+--clipboard               # copy transcription to clipboard
+-o, --output FILE         # write transcription to file
+```
+
+**server options**
+```sh
+--host HOST               # server host (default: 0.0.0.0)
+--port PORT               # server port (default: 5000)
+```
+
+### examples
+
+**basic recording**
+```sh
+listen                             # english, base model
+listen -l es                       # spanish
+listen -l es -m medium             # spanish with better model
+```
+
+**file transcription**
+```sh
+listen -f audio.mp3                # transcribe file
+listen -f audio.mp3 -l es -m small # with options
+```
+
+**automation**
+```sh
+listen --quiet --json              # minimal output
+listen --vad 2 --json              # auto-stop with JSON
+listen --signal-mode --quiet &     # background recording
+```
+
+**server**
+```sh
+listen -s                          # start server
+listen -s --port 8080 -m medium    # custom port and model
+```
+
 ## uninstall
+
+**homebrew**
+```sh
+brew uninstall listen
+brew untap gmoqa/listen
+```
+
+**arch linux**
+```sh
+yay -R listen
+# or
+sudo pacman -R listen
+```
 
 **termux**
 ```sh
@@ -194,9 +335,15 @@ rm $PREFIX/bin/listen
 pip uninstall openai-whisper sounddevice numpy scipy
 ```
 
-**mac/linux**
+**manual install**
 ```sh
 rm -rf ~/.local/share/listen ~/.local/bin/listen
 ```
 
-all processing happens locally on your device
+## notes
+
+- all processing happens locally on your device
+- no API keys required
+- no cloud services or external dependencies
+- first run downloads the specified Whisper model (~75MB-3GB)
+- models are cached for future use
