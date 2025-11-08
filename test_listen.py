@@ -94,35 +94,46 @@ class TestFileMode:
                 os.unlink(tmp_path)
 
 
-class TestConfigCommand:
-    """Test config subcommand"""
+class TestConfig:
+    """Test configuration defaults"""
 
-    def test_config_help(self):
-        """Test that config --help works"""
+    def test_config_defaults(self):
+        """Test that config.py provides default values"""
+        import config
+
+        # Test that basic config values exist
+        assert hasattr(config, 'MODEL')
+        assert hasattr(config, 'LANGUAGE')
+        assert hasattr(config, 'SAMPLE_RATE')
+        assert hasattr(config, 'CHANNELS')
+
+        # Test default values
+        assert config.MODEL == 'tiny'  # Should be tiny after refactor
+        assert config.LANGUAGE == 'en'
+        assert config.SAMPLE_RATE == 16000
+        assert config.CHANNELS == 1
+
+    def test_config_vad_settings(self):
+        """Test VAD configuration values"""
+        import config
+
+        assert hasattr(config, 'VAD_THRESHOLD')
+        assert hasattr(config, 'VAD_DEFAULT_DURATION')
+        assert isinstance(config.VAD_THRESHOLD, float)
+        assert isinstance(config.VAD_DEFAULT_DURATION, float)
+
+    def test_help_mentions_config_file(self):
+        """Test that help text mentions editing config.py"""
         result = subprocess.run(
-            [sys.executable, 'listen.py', 'config', '--help'],
+            [sys.executable, 'listen.py', '--help'],
             capture_output=True,
             text=True,
             cwd=os.path.dirname(os.path.abspath(__file__))
         )
 
         assert result.returncode == 0
-        assert 'Usage:' in result.stdout or 'usage:' in result.stdout
-        assert '--show' in result.stdout
-        assert '--reset' in result.stdout
-
-    def test_config_show(self):
-        """Test that config --show displays configuration"""
-        result = subprocess.run(
-            [sys.executable, 'listen.py', 'config', '--show'],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__))
-        )
-
-        assert result.returncode == 0
-        assert 'language:' in result.stdout.lower()
-        assert 'model:' in result.stdout.lower()
+        assert 'config.py' in result.stdout.lower()
+        assert 'reinstall' in result.stdout.lower()
 
 
 class TestArgumentParsing:
@@ -200,33 +211,199 @@ class TestValidation:
                 os.unlink(tmp_path)
 
 
-class TestServerMode:
-    """Test server mode basics"""
+class TestVersionFlag:
+    """Test version flag"""
 
-    def test_server_mode_flag(self):
-        """Test that server mode flag is recognized"""
-        # Start server and immediately kill it
-        process = subprocess.Popen(
-            [sys.executable, 'listen.py', '-s'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+    def test_version_flag(self):
+        """Test that --version shows version number"""
+        result = subprocess.run(
+            [sys.executable, 'listen.py', '--version'],
+            capture_output=True,
             text=True,
             cwd=os.path.dirname(os.path.abspath(__file__))
         )
 
+        assert result.returncode == 0
+        assert 'listen' in result.stdout
+        # Should contain version number (format: X.Y.Z)
+        import re
+        assert re.search(r'\d+\.\d+\.\d+', result.stdout)
+
+
+class TestOutputModes:
+    """Test various output modes"""
+
+    def test_json_flag_recognized(self):
+        """Test that -j/--json flag is recognized"""
+        # Test with nonexistent file to fail fast
+        result = subprocess.run(
+            [sys.executable, 'listen.py', '-f', '/tmp/fake.wav', '-j'],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        # Should fail on file not found, not on argument parsing
+        assert 'File not found' in result.stderr or 'not found' in result.stderr.lower()
+
+    def test_quiet_flag_recognized(self):
+        """Test that -q/--quiet flag is recognized"""
+        result = subprocess.run(
+            [sys.executable, 'listen.py', '-f', '/tmp/fake.wav', '-q'],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        # Should fail on file not found, not on argument parsing
+        assert 'File not found' in result.stderr or 'not found' in result.stderr.lower()
+
+    def test_output_file_flag_recognized(self):
+        """Test that -o/--output flag is recognized"""
+        result = subprocess.run(
+            [sys.executable, 'listen.py', '-f', '/tmp/fake.wav', '-o', '/tmp/out.txt'],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        # Should fail on file not found, not on argument parsing
+        assert 'File not found' in result.stderr or 'not found' in result.stderr.lower()
+
+
+class TestSpecialModes:
+    """Test special recording modes"""
+
+    def test_codevoice_flag_recognized(self):
+        """Test that --codevoice flag is recognized"""
+        result = subprocess.run(
+            [sys.executable, 'listen.py', '--help'],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        assert result.returncode == 0
+        assert '--codevoice' in result.stdout
+
+    def test_vad_flag_recognized(self):
+        """Test that --vad flag is recognized in help"""
+        result = subprocess.run(
+            [sys.executable, 'listen.py', '--help'],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        assert result.returncode == 0
+        assert '--vad' in result.stdout
+
+    def test_signal_mode_flag_recognized(self):
+        """Test that --signal-mode flag is recognized in help"""
+        result = subprocess.run(
+            [sys.executable, 'listen.py', '--help'],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        assert result.returncode == 0
+        assert '--signal-mode' in result.stdout
+
+
+class TestOutputTranscription:
+    """Test critical output functionality"""
+
+    def test_json_output_format(self):
+        """Test that JSON output is properly formatted"""
+        import json
+        import listen
+
+        # Temporarily set modes
+        original_json = listen.json_mode
+        original_quiet = listen.quiet_mode
+        original_output = listen.output_file
+
         try:
-            # Wait a bit to see if it starts
-            import time
-            time.sleep(1)
+            listen.json_mode = True
+            listen.quiet_mode = False
+            listen.output_file = None
 
-            # Check if process is running
-            assert process.poll() is None  # None means still running
+            # Capture stdout
+            from io import StringIO
+            import sys
+            captured = StringIO()
+            sys.stdout = captured
 
-            # Try to read some output
-            # Note: This is a basic test, full server testing would need more setup
+            # Call output_transcription
+            listen.output_transcription("test text", "en", "tiny", 1.5)
+
+            # Get output
+            sys.stdout = sys.__stdout__
+            output = captured.getvalue()
+
+            # Validate JSON
+            data = json.loads(output.strip())
+            assert data['transcription'] == 'test text'
+            assert data['language'] == 'en'
+            assert data['model'] == 'tiny'
+            assert data['duration'] == 1.5
+
         finally:
-            process.terminate()
-            process.wait(timeout=5)
+            # Restore
+            listen.json_mode = original_json
+            listen.quiet_mode = original_quiet
+            listen.output_file = original_output
+
+    def test_file_output(self):
+        """Test that file output writes correctly"""
+        import listen
+
+        # Temporarily set modes
+        original_json = listen.json_mode
+        original_quiet = listen.quiet_mode
+        original_output = listen.output_file
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as tmp:
+            tmp_path = tmp.name
+
+        try:
+            listen.json_mode = False
+            listen.quiet_mode = True
+            listen.output_file = tmp_path
+
+            # Capture stdout (should still print to stdout)
+            from io import StringIO
+            import sys
+            captured = StringIO()
+            sys.stdout = captured
+
+            # Call output_transcription
+            listen.output_transcription("test output", "es", "tiny")
+
+            # Get stdout
+            sys.stdout = sys.__stdout__
+            stdout_output = captured.getvalue()
+
+            # Verify stdout has the text
+            assert 'test output' in stdout_output
+
+            # Verify file was written
+            with open(tmp_path, 'r') as f:
+                file_content = f.read()
+            assert file_content == 'test output'
+
+        finally:
+            # Restore
+            listen.json_mode = original_json
+            listen.quiet_mode = original_quiet
+            listen.output_file = original_output
+            # Cleanup
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
 
 if __name__ == '__main__':

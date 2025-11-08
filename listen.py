@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-import sys, os, tempfile, wave, time, threading, queue, fcntl, termios, re, signal
+import sys, os, tempfile, wave, time, threading, queue, fcntl, termios, re, signal, argparse
+import numpy as np
+import sounddevice as sd
+import whisper
 import config
 
-__version__ = '1.2.3'
-
-# Lazy imports (loaded only when needed)
-np = None
-sd = None
-whisper = None
+__version__ = '2.0.0'
 
 # ANSI escape codes
 CLR = '\033[K'
@@ -17,39 +15,60 @@ YEL = '\033[93m'
 MAG = '\033[95m'  # Magenta/Purple
 RST = '\033[0m'
 
-# Audio configuration
-SAMPLE_RATE = 16000
-CHANNELS = 1
+# Audio configuration (from config.py)
+SAMPLE_RATE = config.SAMPLE_RATE
+CHANNELS = config.CHANNELS
+CHUNK_SIZE = config.CHUNK_SIZE
 DTYPE = 'float32'
-
-# VAD configuration
-VAD_THRESHOLD = 0.015      # Volume threshold for silence detection
-VAD_DEFAULT_DURATION = 2.0 # Default silence duration in seconds
-
-# Server configuration
-DEFAULT_SERVER_HOST = '0.0.0.0'
-DEFAULT_SERVER_PORT = 5000
 
 # Recording state
 rec = []
 lvl = [0.0]
 pct = [0.0]
 verbose = False
-first_run = True
 is_tty = sys.stdout.isatty()
 stdin_is_tty = sys.stdin.isatty()
 signal_stop = [False]
 signal_mode = False
 vad_enabled = False
-vad_silence_duration = VAD_DEFAULT_DURATION
-vad_threshold = VAD_THRESHOLD
+vad_silence_duration = config.VAD_DEFAULT_DURATION
+vad_threshold = config.VAD_THRESHOLD
 
 # Scripting mode flags
 quiet_mode = False
 json_mode = False
-clipboard_mode = False
 output_file = None
 codevoice_mode = False
+
+# Help text
+HELP = """usage: listen [MODE] [OPTIONS]
+
+Modes:
+  (default)           Record audio from microphone and transcribe
+  -f, --file FILE     Transcribe audio from file (mp3, wav, m4a, etc.)
+
+Options:
+  -l, --language LANG     Language code (default: {lang})
+  -m, --model MODEL       Whisper model (default: {model})
+  --signal-mode           Use SIGUSR1 signal to stop recording
+  --vad SECONDS           Auto-stop after N seconds of silence
+  --codevoice             Full-width visual mode for code voice input
+  --version               Show version and exit
+  -v, --verbose           Verbose output
+
+Scripting options:
+  -q, --quiet             Suppress UI, output only transcription
+  -j, --json              Output in JSON format
+  -o, --output FILE       Write transcription to file
+
+Recording controls:
+  (default) Press SPACE to stop recording
+  (signal)  Send SIGUSR1 to process (kill -SIGUSR1 <pid>)
+  (vad)     Auto-stop after silence duration
+
+Configuration:
+  Edit config.py and reinstall to change defaults
+  CLI arguments override config.py values"""
 
 def log(msg):
     if verbose:
@@ -73,9 +92,8 @@ def output_transcription(text, lang, model_name, duration=None):
     else:
         output_text = text
 
-    # Output to stdout (unless suppressed by -o or --clipboard only)
-    if not output_file or not clipboard_mode:
-        print(output_text, flush=True)
+    # Output to stdout
+    print(output_text, flush=True)
 
     # Write to file if specified
     if output_file:
@@ -86,31 +104,6 @@ def output_transcription(text, lang, model_name, duration=None):
                 print(f'Written to {output_file}', file=sys.stderr)
         except Exception as e:
             print(f'Error writing to file: {e}', file=sys.stderr)
-
-    # Copy to clipboard if specified
-    if clipboard_mode:
-        try:
-            import subprocess
-            import platform
-
-            system = platform.system()
-            if system == 'Darwin':  # macOS
-                subprocess.run(['pbcopy'], input=output_text.encode('utf-8'), check=True)
-            elif system == 'Linux':
-                # Try xclip first, then xsel
-                try:
-                    subprocess.run(['xclip', '-selection', 'clipboard'],
-                                 input=output_text.encode('utf-8'), check=True)
-                except FileNotFoundError:
-                    subprocess.run(['xsel', '--clipboard', '--input'],
-                                 input=output_text.encode('utf-8'), check=True)
-            elif system == 'Windows':
-                subprocess.run(['clip'], input=output_text.encode('utf-8'), check=True)
-
-            if not quiet_mode and not json_mode:
-                print('Copied to clipboard', file=sys.stderr)
-        except Exception as e:
-            print(f'Error copying to clipboard: {e}', file=sys.stderr)
 
 
 def signal_handler(signum, frame):
@@ -161,70 +154,41 @@ def kbd_listen(q):
         pass
 
 
-def draw(c, bars, txt='Listening', hint=''):
-    # Skip UI in quiet/json mode
-    if quiet_mode or json_mode:
-        return
-    # Always show UI on stderr when not TTY (piped), or stdout when TTY
-    out = sys.stderr if not is_tty else sys.stdout
-    hint_str = f'  {MAG}{hint}{RST}' if hint else ''
-    out.write(f'\r{RED}●{RST} {txt}  [{c}{bars}{RST}]{hint_str}')
-    out.flush()
-
-
-def draw_codevoice(level, txt='Listening', hint=''):
+def draw(level, txt='Listening', hint='', fullwidth=False):
+    """Draw progress bar - simple or full-width based on mode"""
     # Skip UI in quiet/json mode
     if quiet_mode or json_mode:
         return
 
-    # Get terminal width
-    try:
-        import shutil
-        terminal_width = shutil.get_terminal_size().columns
-    except:
-        terminal_width = 80
-
-    # Always show UI on stderr when not TTY (piped), or stdout when TTY
     out = sys.stderr if not is_tty else sys.stdout
-
-    # Calculate bar width (leave space for indicator and text)
-    prefix = f'{RED}●{RST} {txt}  '
-    # Strip ANSI codes for length calculation
-    prefix_len = len('● ' + txt + '  ')
-
-    hint_len = len(hint) + 2 if hint else 0
-    available_width = terminal_width - prefix_len - hint_len - 4
-
-    if available_width < 10:
-        available_width = 10
-
-    # Create full-width bar based on audio level
-    filled = int(level * available_width)
-    filled = max(0, min(filled, available_width))
-
-    # Create visual bar with gradient effect
-    bar = '█' * filled + '░' * (available_width - filled)
-
-    # Add hint if present
     hint_str = f'  {MAG}{hint}{RST}' if hint else ''
 
-    # Write full line
-    out.write(f'\r{prefix}[{YEL}{bar}{RST}]{hint_str}')
+    if fullwidth:
+        # Full-width codevoice mode
+        try:
+            import shutil
+            terminal_width = shutil.get_terminal_size().columns
+        except:
+            terminal_width = 80
+
+        prefix_len = len('● ' + txt + '  ')
+        hint_len = len(hint) + 2 if hint else 0
+        available_width = max(10, terminal_width - prefix_len - hint_len - 4)
+
+        filled = max(0, min(int(level * available_width), available_width))
+        bar = '█' * filled + '░' * (available_width - filled)
+        out.write(f'\r{RED}●{RST} {txt}  [{YEL}{bar}{RST}]{hint_str}')
+    else:
+        # Simple mode - fixed width
+        filled = min(int(level * 200), 10)
+        bar = '=' * filled + ' ' * (10 - filled)
+        out.write(f'\r{RED}●{RST} {txt}  [{bar}]{hint_str}')
+
     out.flush()
 
 
 def record(start_proc):
-    global rec, np, sd, signal_stop
-
-    log('Loading audio libraries')
-    if not np:
-        import numpy
-        np = numpy
-        log('NumPy loaded')
-    if not sd:
-        import sounddevice
-        sd = sounddevice
-        log('SoundDevice loaded')
+    global rec, signal_stop
 
     rec = []
     q = queue.Queue()
@@ -241,10 +205,10 @@ def record(start_proc):
         hint = f'Signal mode: kill -SIGUSR1 {pid}'
     elif vad_enabled:
         hint = f'VAD mode: auto-stop after {vad_silence_duration}s silence'
-    elif first_run and stdin_is_tty:
+    elif stdin_is_tty:
         hint = 'Press SPACE to stop'
 
-    draw('', ' ' * 10, hint=hint)
+    draw(0.0, hint=hint, fullwidth=codevoice_mode)
 
     log(f'Starting audio stream ({SAMPLE_RATE//1000}kHz, {"stereo" if CHANNELS == 2 else "mono"})')
     # In signal mode or VAD mode, no timeout - wait for signal/silence
@@ -264,10 +228,7 @@ def record(start_proc):
         t0 = time.time()
 
         while True:
-            if codevoice_mode:
-                draw_codevoice(lvl[0], hint=hint)
-            else:
-                draw('', '=' * min(int(lvl[0] * 200), 10) + ' ' * max(10 - int(lvl[0] * 200), 0), hint=hint)
+            draw(lvl[0], hint=hint, fullwidth=codevoice_mode)
 
             # Check signal stop (for signal mode)
             if signal_mode and signal_stop[0]:
@@ -326,9 +287,9 @@ def record(start_proc):
         log('Audio stream stopped and closed')
 
     for _ in range(3):
-        draw('', '=' * 10)
+        draw(1.0, fullwidth=codevoice_mode)
         time.sleep(0.15)
-        draw('', ' ' * 10)
+        draw(0.0, fullwidth=codevoice_mode)
         time.sleep(0.15)
 
     start_proc()
@@ -346,14 +307,9 @@ def record(start_proc):
 
 
 def transcribe(path, model, lang, run=None, blink_state=None):
-    global whisper, pct
+    global pct
 
     log(f'Loading Whisper model: {model}')
-    if not whisper:
-        import whisper as w
-        whisper = w
-        log('Whisper library loaded')
-
     try:
         t0 = time.time()
         m = whisper.load_model(model)
@@ -393,463 +349,74 @@ def transcribe(path, model, lang, run=None, blink_state=None):
     return r
 
 
-def start_server(host=DEFAULT_SERVER_HOST, port=DEFAULT_SERVER_PORT, model='base', lang='en'):
-    """Start Flask server for audio transcription API"""
-    global whisper, verbose
+def show_processing_animation(run, pct, blink_state, fullwidth):
+    """Show processing animation in background thread"""
+    def prog():
+        while run[0]:
+            # Simple pulsing animation when starting (<15%)
+            if pct[0] < 0.15:
+                level = 0.1 if (blink_state[0] // 6) % 2 == 0 else 0.0
+            else:
+                level = pct[0]
+            blink_state[0] += 1
+            draw(level, txt='Processing', fullwidth=fullwidth)
+            time.sleep(0.05)
+    threading.Thread(target=prog, daemon=True).start()
+    pct[0] = 0.0
 
-    # Lazy import - only load Flask if server mode is used
-    try:
-        from flask import Flask, request, jsonify
-    except ImportError:
-        print('Error: Flask is required for server mode', file=sys.stderr)
-        print('Install: pip install flask', file=sys.stderr)
+
+def process_file(file_path, lang, mdl, codevoice):
+    """Transcribe audio from file"""
+    # Validate file exists
+    if not os.path.exists(file_path):
+        print(f'Error: File not found: {file_path}', file=sys.stderr)
         sys.exit(1)
 
-    app = Flask(__name__)
+    # Validate file is readable
+    if not os.path.isfile(file_path):
+        print(f'Error: Not a file: {file_path}', file=sys.stderr)
+        sys.exit(1)
 
-    @app.route('/health', methods=['GET'])
-    def health():
-        return jsonify({'status': 'ok'})
+    # Check file size (warn if > 100MB)
+    file_size = os.path.getsize(file_path)
+    if file_size > 100 * 1024 * 1024:
+        print(f'Warning: Large file ({file_size / (1024*1024):.1f}MB), transcription may take a while', file=sys.stderr)
 
-    @app.route('/transcribe', methods=['POST'])
-    def transcribe_audio():
-        if 'audio' not in request.files:
-            return jsonify({'error': 'No audio file provided'}), 400
+    log(f'Processing file: {file_path} ({file_size} bytes)')
 
-        audio_file = request.files['audio']
-        if audio_file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
+    # Show processing UI
+    global pct
+    run = [True]
+    blink_state = [0]
+    show_processing_animation(run, pct, blink_state, codevoice)
 
-        # Get optional parameters
-        req_lang = request.form.get('language', lang)
-        req_model = request.form.get('model', model)
+    try:
+        r = transcribe(file_path, mdl, lang, run, blink_state)
+        # Clear the UI line (unless in quiet/json mode)
+        if not quiet_mode and not json_mode:
+            out = sys.stderr if not is_tty else sys.stdout
+            out.write('\r' + CLR)
+            out.flush()
+        log(f'Final transcription: "{r["text"].strip()}"')
 
-        # Save uploaded file to temp location
-        tmp = tempfile.NamedTemporaryFile(suffix='.audio', delete=False)
-        try:
-            audio_file.save(tmp.name)
-            tmp.close()
-
-            log(f'Received file: {audio_file.filename} ({os.path.getsize(tmp.name)} bytes)')
-            log(f'Transcribing with model={req_model}, language={req_lang}')
-
-            # Transcribe without UI elements (no run/blink_state)
-            result = transcribe(tmp.name, req_model, req_lang)
-
-            return jsonify({
-                'text': result['text'].strip(),
-                'language': result.get('language', req_lang)
-            })
-        except Exception as e:
-            log(f'Transcription error: {e}')
-            return jsonify({'error': str(e)}), 500
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except:
-                pass
-
-    print(f'Starting transcription API server on {host}:{port}')
-    print(f'Model: {model}, Language: {lang}')
-    print(f'\nEndpoints:')
-    print(f'  GET  /health     - Health check')
-    print(f'  POST /transcribe - Transcribe audio file')
-    print(f'\nExample usage:')
-    print(f'  curl -X POST -F "audio=@file.mp3" http://{host}:{port}/transcribe')
-    print(f'\nPress Ctrl+C to stop the server\n')
-
-    app.run(host=host, port=port, debug=False)
-
-
-def handle_config_command(args):
-    """Handle 'listen config' subcommand"""
-    if not args or args[0] in ['-h', '--help']:
-        config.show_config_help()
-        return 0
-
-    # Check for special commands first
-    if '--show' in args:
-        current_config = config.load_config()
-        print(config.format_config_for_display(current_config))
-        return 0
-
-    if '--reset' in args:
-        if config.reset_config():
-            print('Configuration reset to defaults')
-            print(f'Config file deleted: {config.get_config_path()}')
-            return 0
+        text = r['text'].strip()
+        output_transcription(text, lang, mdl)
+    except Exception as e:
+        log(f'Transcription error: {e}')
+        if verbose:
+            import traceback
+            traceback.print_exc()
         else:
-            print('Error: Could not reset configuration', file=sys.stderr)
-            return 1
-
-    # Load current config
-    current_config = config.load_config()
-    changes = {}
-
-    # Parse arguments to update
-    i = 0
-    while i < len(args):
-        arg = args[i]
-
-        if arg in ['-l', '--language']:
-            if i + 1 >= len(args):
-                print('Error: --language requires an argument', file=sys.stderr)
-                return 1
-            changes['language'] = args[i + 1]
-            i += 2
-
-        elif arg in ['-m', '--model']:
-            if i + 1 >= len(args):
-                print('Error: --model requires an argument', file=sys.stderr)
-                return 1
-            model = args[i + 1]
-            if model not in ['tiny', 'base', 'small', 'medium', 'large']:
-                print(f'Error: Invalid model "{model}". Must be: tiny, base, small, medium, large', file=sys.stderr)
-                return 1
-            changes['model'] = model
-            i += 2
-
-        elif arg == '--vad':
-            if i + 1 >= len(args):
-                print('Error: --vad requires a number (seconds)', file=sys.stderr)
-                return 1
-            try:
-                duration = float(args[i + 1])
-                if duration <= 0:
-                    print('Error: --vad must be a positive number', file=sys.stderr)
-                    return 1
-                if 'vad' not in changes:
-                    changes['vad'] = current_config.get('vad', {}).copy()
-                changes['vad']['enabled'] = True
-                changes['vad']['silence_duration'] = duration
-            except ValueError:
-                print(f'Error: Invalid number for --vad: {args[i + 1]}', file=sys.stderr)
-                return 1
-            i += 2
-
-        elif arg == '--host':
-            if i + 1 >= len(args):
-                print('Error: --host requires an argument', file=sys.stderr)
-                return 1
-            if 'server' not in changes:
-                changes['server'] = current_config.get('server', {}).copy()
-            changes['server']['host'] = args[i + 1]
-            i += 2
-
-        elif arg == '--port':
-            if i + 1 >= len(args):
-                print('Error: --port requires a number', file=sys.stderr)
-                return 1
-            try:
-                port = int(args[i + 1])
-                if not (1 <= port <= 65535):
-                    print('Error: Port must be between 1 and 65535', file=sys.stderr)
-                    return 1
-                if 'server' not in changes:
-                    changes['server'] = current_config.get('server', {}).copy()
-                changes['server']['port'] = port
-            except ValueError:
-                print(f'Error: Invalid port number: {args[i + 1]}', file=sys.stderr)
-                return 1
-            i += 2
-
-        elif arg == '--claude':
-            # Toggle claude mode
-            current_claude = current_config.get('claude', False)
-            changes['claude'] = not current_claude
-            i += 1
-
-        elif arg == '--verbose':
-            # Toggle verbose mode
-            current_verbose = current_config.get('verbose', False)
-            changes['verbose'] = not current_verbose
-            i += 1
-
-        elif arg == '--signal-mode':
-            # Toggle signal mode
-            current_signal = current_config.get('signal_mode', False)
-            changes['signal_mode'] = not current_signal
-            i += 1
-
-        else:
-            print(f'Error: Unknown config option: {arg}', file=sys.stderr)
-            print('Run "listen config --help" for usage', file=sys.stderr)
-            return 1
-
-    # If no changes, show help
-    if not changes:
-        config.show_config_help()
-        return 0
-
-    # Apply changes to current config
-    updated_config = config.deep_merge(current_config, changes)
-
-    # Validate
-    is_valid, error = config.validate_config(updated_config)
-    if not is_valid:
-        print(f'Error: {error}', file=sys.stderr)
-        return 1
-
-    # Save
-    if config.save_config(updated_config):
-        print('Configuration updated successfully')
-        print(f'Saved to: {config.get_config_path()}')
-        print()
-        print('Changes:')
-        for key, value in changes.items():
-            if isinstance(value, dict):
-                for subkey, subvalue in value.items():
-                    print(f'  {key}.{subkey}: {subvalue}')
-            else:
-                print(f'  {key}: {value}')
-        return 0
-    else:
-        print('Error: Could not save configuration', file=sys.stderr)
-        return 1
+            print(f'Error: {e}', file=sys.stderr)
+        sys.exit(1)
+    finally:
+        run[0] = False
 
 
-def main():
-    global verbose, first_run, signal_mode, vad_enabled, vad_silence_duration, codevoice_mode
-
-    # Check if this is a config subcommand
-    if len(sys.argv) > 1 and sys.argv[1] == 'config':
-        sys.exit(handle_config_command(sys.argv[2:]))
-
-    # Handle version before config loading
-    if len(sys.argv) > 1 and sys.argv[1] == '--version':
-        print(f"listen {__version__}")
-        return
-
-    # Handle help before config loading
-    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help']:
-        print("usage: listen [config|COMMAND] [OPTIONS]")
-        print("\nCommands:")
-        print("  config              Manage persistent configuration")
-        print("\nModes:")
-        print("  (default)           Record audio from microphone and transcribe")
-        print("  -s, --server        Start HTTP API server for transcription")
-        print("  -f, --file FILE     Transcribe audio from file (mp3, wav, m4a, etc.)")
-        print("\nOptions:")
-        print("  -l, --language LANG     Language code (default: from config or 'en')")
-        print("  -m, --model MODEL       Whisper model (default: from config or 'base')")
-        print("  -c, --claude            Send transcription to Claude")
-        print("  --signal-mode           Use SIGUSR1 signal to stop recording")
-        print("  --vad SECONDS           Auto-stop after N seconds of silence")
-        print("  --codevoice             Full-width visual mode for code voice input")
-        print("  --version               Show version and exit")
-        print("  -v, --verbose           Verbose output")
-        print("\nScripting options:")
-        print("  -q, --quiet             Suppress UI, output only transcription")
-        print("  -j, --json              Output in JSON format")
-        print("  --clipboard             Copy transcription to clipboard")
-        print("  -o, --output FILE       Write transcription to file")
-        print("\nServer options:")
-        print(f"  --host HOST             Server host (default: {DEFAULT_SERVER_HOST})")
-        print(f"  --port PORT             Server port (default: {DEFAULT_SERVER_PORT})")
-        print("\nRecording controls:")
-        print("  (default) Press SPACE to stop recording")
-        print("  (signal)  Send SIGUSR1 to process (kill -SIGUSR1 <pid>)")
-        print("  (vad)     Auto-stop after silence duration")
-        print("\nConfiguration:")
-        print("  Config file: ~/.listen/config.json")
-        print("  Precedence: CLI args > config file > defaults")
-        print("  See 'listen config --help' for config management")
-        return
-
-    marker = os.path.expanduser('~/.local/share/listen/.first_run_done')
-    if os.path.exists(marker):
-        first_run = False
-    else:
-        os.makedirs(os.path.dirname(marker), exist_ok=True)
-        with open(marker, 'w') as f:
-            f.write('')
-
-    # Parse CLI arguments (only explicitly provided ones)
-    global quiet_mode, json_mode, clipboard_mode, output_file
-    cli_args = {}
-    file_path = None
-    i = 0
-    args = sys.argv[1:]
-
-    while i < len(args):
-        arg = args[i]
-
-        if arg in ['-l', '--language'] and i + 1 < len(args):
-            cli_args['language'] = args[i + 1]
-            i += 2
-        elif arg in ['-m', '--model'] and i + 1 < len(args):
-            cli_args['model'] = args[i + 1]
-            i += 2
-        elif arg in ['-c', '--claude']:
-            cli_args['claude'] = True
-            i += 1
-        elif arg in ['-q', '--quiet']:
-            quiet_mode = True
-            i += 1
-        elif arg in ['-j', '--json']:
-            json_mode = True
-            i += 1
-        elif arg == '--clipboard':
-            clipboard_mode = True
-            i += 1
-        elif arg in ['-o', '--output'] and i + 1 < len(args):
-            output_file = args[i + 1]
-            i += 2
-        elif arg in ['-s', '--server']:
-            if 'server' not in cli_args:
-                cli_args['server'] = {}
-            cli_args['server']['enabled'] = True
-            i += 1
-        elif arg in ['-f', '--file'] and i + 1 < len(args):
-            file_path = args[i + 1]
-            i += 2
-        elif arg == '--signal-mode':
-            cli_args['signal_mode'] = True
-            i += 1
-        elif arg == '--vad' and i + 1 < len(args):
-            if 'vad' not in cli_args:
-                cli_args['vad'] = {}
-            cli_args['vad']['enabled'] = True
-            cli_args['vad']['silence_duration'] = float(args[i + 1])
-            i += 2
-        elif arg == '--codevoice':
-            cli_args['codevoice'] = True
-            i += 1
-        elif arg == '--host' and i + 1 < len(args):
-            if 'server' not in cli_args:
-                cli_args['server'] = {}
-            cli_args['server']['host'] = args[i + 1]
-            i += 2
-        elif arg == '--port' and i + 1 < len(args):
-            if 'server' not in cli_args:
-                cli_args['server'] = {}
-            cli_args['server']['port'] = int(args[i + 1])
-            i += 2
-        elif arg in ['-v', '--verbose']:
-            cli_args['verbose'] = True
-            i += 1
-        else:
-            i += 1
-
-    # Load config and merge with CLI args
-    defaults = config.get_defaults()
-    file_config = config.load_config()
-    final_config = config.merge_config(defaults, file_config, cli_args)
-
-    # Clear screen on the appropriate stream (unless in quiet/json mode)
-    # Disabled: now displays inline with the cursor position
-    # if not quiet_mode and not json_mode:
-    #     out = sys.stderr if not is_tty else sys.stdout
-    #     out.write(HOME)
-    #     out.flush()
-
-    # Extract values from merged config
-    lang = final_config['language']
-    mdl = final_config['model']
-    use_claude = final_config['claude']
-    verbose = final_config['verbose']
-    signal_mode = final_config['signal_mode']
-    codevoice_mode = final_config['codevoice']
-
-    # VAD settings
-    vad_enabled = final_config['vad']['enabled']
-    vad_silence_duration = final_config['vad']['silence_duration']
-
-    # Server settings
-    server_mode = final_config['server']['enabled']
-    server_host = final_config['server']['host']
-    server_port = final_config['server']['port']
-
-    # Server mode
-    if server_mode:
-        start_server(host=server_host, port=server_port, model=mdl, lang=lang)
-        return
-
-    # File mode - transcribe from file
-    if file_path:
-        # Validate file exists
-        if not os.path.exists(file_path):
-            print(f'Error: File not found: {file_path}', file=sys.stderr)
-            sys.exit(1)
-
-        # Validate file is readable
-        if not os.path.isfile(file_path):
-            print(f'Error: Not a file: {file_path}', file=sys.stderr)
-            sys.exit(1)
-
-        # Check file size (warn if > 100MB)
-        file_size = os.path.getsize(file_path)
-        if file_size > 100 * 1024 * 1024:
-            print(f'Warning: Large file ({file_size / (1024*1024):.1f}MB), transcription may take a while', file=sys.stderr)
-
-        log(f'Processing file: {file_path} ({file_size} bytes)')
-
-        # Show processing UI
-        global pct
-        run = [True]
-        blink_state = [0]
-
-        def start_proc():
-            def prog():
-                while run[0]:
-                    n = int(pct[0] * 10)
-                    if pct[0] < 0.15:
-                        bars = ('=' if (blink_state[0] // 6) % 2 == 0 else ' ') + ' ' * 9
-                    else:
-                        bars = '=' * max(1, n) + ' ' * (10 - max(1, n))
-                    blink_state[0] += 1
-                    draw(YEL, bars, 'Processing')
-                    time.sleep(0.05)
-            threading.Thread(target=prog, daemon=True).start()
-            pct[0] = 0.0
-
-        start_proc()
-
-        try:
-            r = transcribe(file_path, mdl, lang, run, blink_state)
-            # Clear the UI line (unless in quiet/json mode)
-            if not quiet_mode and not json_mode:
-                out = sys.stderr if not is_tty else sys.stdout
-                out.write('\r' + CLR)
-                out.flush()
-            log(f'Final transcription: "{r["text"].strip()}"')
-
-            text = r['text'].strip()
-
-            if use_claude:
-                # Send transcribed text as prompt to claude
-                import subprocess
-                import shlex
-                log(f'Sending to claude as prompt: "{text}"')
-
-                # Try common claude paths
-                claude_path = os.path.expanduser('~/.claude/local/claude')
-                if not os.path.exists(claude_path):
-                    claude_path = 'claude'
-
-                try:
-                    cmd = f'{claude_path} -p {shlex.quote(text)}'
-                    subprocess.run(cmd, shell=True, check=True)
-                except subprocess.CalledProcessError as e:
-                    print(f'Error running claude: {e}', file=sys.stderr)
-                    sys.exit(1)
-            else:
-                output_transcription(text, lang, mdl)
-        except Exception as e:
-            log(f'Transcription error: {e}')
-            if verbose:
-                import traceback
-                traceback.print_exc()
-            else:
-                print(f'Error: {e}', file=sys.stderr)
-            sys.exit(1)
-        finally:
-            run[0] = False
-
-        return
-
+def process_recording(lang, mdl, sig_mode, codevoice):
+    """Record and transcribe audio from microphone"""
     # Configure signal handler if in signal mode
-    if signal_mode:
+    if sig_mode:
         signal.signal(signal.SIGUSR1, signal_handler)
         log('Signal mode enabled: listening for SIGUSR1')
         # Show PID in stderr even in quiet/json mode (needed for signal)
@@ -864,18 +431,7 @@ def main():
     blink_state = [0]
 
     def start_proc():
-        def prog():
-            while run[0]:
-                n = int(pct[0] * 10)
-                if pct[0] < 0.15:
-                    bars = ('=' if (blink_state[0] // 6) % 2 == 0 else ' ') + ' ' * 9
-                else:
-                    bars = '=' * max(1, n) + ' ' * (10 - max(1, n))
-                blink_state[0] += 1
-                draw(YEL, bars, 'Processing')
-                time.sleep(0.05)
-        threading.Thread(target=prog, daemon=True).start()
-        pct[0] = 0.0
+        show_processing_animation(run, pct, blink_state, codevoice)
 
     data = record(start_proc)
     if data is None or len(data) == 0:
@@ -903,27 +459,7 @@ def main():
         log(f'Final transcription: "{r["text"].strip()}"')
 
         text = r['text'].strip()
-
-        if use_claude:
-            # Send transcribed text as prompt to claude
-            import subprocess
-            import shlex
-            log(f'Sending to claude as prompt: "{text}"')
-
-            # Try common claude paths
-            claude_path = os.path.expanduser('~/.claude/local/claude')
-            if not os.path.exists(claude_path):
-                claude_path = 'claude'
-
-            try:
-                # Use shell=True to support aliases, properly escape text
-                cmd = f'{claude_path} -p {shlex.quote(text)}'
-                subprocess.run(cmd, shell=True, check=True)
-            except subprocess.CalledProcessError as e:
-                print(f'Error running claude: {e}', file=sys.stderr)
-                sys.exit(1)
-        else:
-            output_transcription(text, lang, mdl)
+        output_transcription(text, lang, mdl)
     except Exception as e:
         log(f'Transcription error: {e}')
         if verbose:
@@ -939,6 +475,55 @@ def main():
             log(f'Deleted temp file: {tmp.name}')
         except:
             pass
+
+
+def main():
+    global verbose, signal_mode, vad_enabled, vad_silence_duration, codevoice_mode
+
+    # Handle version
+    if len(sys.argv) > 1 and sys.argv[1] == '--version':
+        print(f"listen {__version__}")
+        return
+
+    # Handle help
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help']:
+        print(HELP.format(lang=config.LANGUAGE, model=config.MODEL))
+        return
+
+    # Parse CLI arguments with argparse
+    global quiet_mode, json_mode, output_file
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('-l', '--language', default=config.LANGUAGE)
+    parser.add_argument('-m', '--model', default=config.MODEL)
+    parser.add_argument('-f', '--file', dest='file_path')
+    parser.add_argument('-q', '--quiet', action='store_true')
+    parser.add_argument('-j', '--json', action='store_true', dest='json_output')
+    parser.add_argument('-o', '--output')
+    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--signal-mode', action='store_true')
+    parser.add_argument('--vad', type=float, metavar='SECONDS')
+    parser.add_argument('--codevoice', action='store_true')
+
+    args = parser.parse_args()
+
+    # Apply parsed arguments
+    lang = args.language
+    mdl = args.model
+    file_path = args.file_path
+    quiet_mode = args.quiet
+    json_mode = args.json_output
+    output_file = args.output
+    verbose = args.verbose if args.verbose else config.SHOW_VERBOSE
+    signal_mode = args.signal_mode
+    vad_enabled = args.vad is not None
+    vad_silence_duration = args.vad if args.vad else config.VAD_DEFAULT_DURATION
+    codevoice_mode = args.codevoice
+
+    # Route to appropriate mode
+    if file_path:
+        process_file(file_path, lang, mdl, codevoice_mode)
+    else:
+        process_recording(lang, mdl, signal_mode, codevoice_mode)
 
 
 if __name__ == '__main__':

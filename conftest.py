@@ -46,14 +46,3 @@ def temp_directory():
     """Create a temporary directory for testing"""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield tmpdir
-
-
-@pytest.fixture
-def mock_config_dir(monkeypatch, temp_directory):
-    """Mock the config directory to use a temp directory"""
-    import config
-
-    config_file = os.path.join(temp_directory, 'config.json')
-    monkeypatch.setattr(config, 'get_config_path', lambda: config_file)
-
-    yield temp_directory, config_file
