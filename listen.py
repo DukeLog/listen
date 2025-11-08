@@ -5,6 +5,13 @@ import sounddevice as sd
 import whisper
 import config
 
+# Try to import faster-whisper for performance optimization
+try:
+    from faster_whisper import WhisperModel
+    FASTER_WHISPER_AVAILABLE = True
+except ImportError:
+    FASTER_WHISPER_AVAILABLE = False
+
 __version__ = '2.0.0'
 
 # ANSI escape codes
@@ -40,6 +47,8 @@ json_mode = False
 output_file = None
 codevoice_mode = False
 status_file = None
+fast_mode = False
+preloaded_model = None
 
 # Help text
 HELP = """usage: listen [MODE] [OPTIONS]
@@ -54,6 +63,7 @@ Options:
   --signal-mode           Use SIGUSR1 signal to stop recording
   --vad SECONDS           Auto-stop after N seconds of silence
   --codevoice             Full-width visual mode for code voice input
+  --fast-mode             Use faster-whisper for 3-4x speed (requires faster-whisper)
   --version               Show version and exit
   -v, --verbose           Verbose output
 
@@ -363,9 +373,7 @@ def record(start_proc, lang, mdl):
 
 
 def transcribe(path, model, lang, run=None, blink_state=None):
-    global pct
-
-    log(f'Loading Whisper model: {model}')
+    global pct, preloaded_model
 
     # Write processing status
     write_status({
@@ -382,52 +390,107 @@ def transcribe(path, model, lang, run=None, blink_state=None):
     })
 
     try:
-        t0 = time.time()
-        m = whisper.load_model(model)
-        log(f'Model loaded in {time.time()-t0:.2f}s')
+        # Use faster-whisper if fast_mode enabled and available
+        if fast_mode and FASTER_WHISPER_AVAILABLE:
+            log(f'Using faster-whisper with model: {model}')
 
-        if blink_state:
-            while (blink_state[0] // 6) % 2 != 0:
-                time.sleep(0.01)
-            pct[0] = 0.2
+            # Use preloaded model if available, otherwise load now
+            if preloaded_model is not None:
+                m = preloaded_model
+                log('Using preloaded model')
+            else:
+                t0 = time.time()
+                m = WhisperModel(model, device="cpu", compute_type="int8")
+                log(f'Model loaded in {time.time()-t0:.2f}s')
 
-        class P:
-            def write(self, txt):
-                if verbose and txt.strip():
-                    print(f'[WHISPER] {txt.strip()}', file=sys.__stderr__)
-                if '%' in txt and (x := re.search(r'(\d+)%', txt)):
-                    progress = int(x.group(1)) / 100.0
-                    if blink_state:
-                        pct[0] = 0.2 + progress * 0.8
-                    # Update status with progress
-                    write_status({
-                        'status': 'processing',
-                        'audio_level': 0.0,
-                        'pid': os.getpid(),
-                        'language': lang,
-                        'model': model,
-                        'timestamp': int(time.time()),
-                        'progress': progress,
-                        'duration': 0.0,
-                        'mode': 'processing',
-                        'transcription': None
-                    })
-            def flush(self): pass
+            if blink_state:
+                while (blink_state[0] // 6) % 2 != 0:
+                    time.sleep(0.01)
+                pct[0] = 0.2
 
-        old = sys.stderr
-        sys.stderr = P()
+            log(f'Starting transcription (language={lang})')
+            t0 = time.time()
 
-        log(f'Starting transcription (language={lang})')
-        t0 = time.time()
-        r = m.transcribe(path, language=lang, fp16=False, verbose=False)
-        log(f'Transcription completed in {time.time()-t0:.2f}s')
-        log(f'Detected language: {r.get("language", "unknown")}')
-        log(f'Text length: {len(r["text"])} chars')
+            # faster-whisper returns (segments, info)
+            segments, info = m.transcribe(path, language=lang, beam_size=5)
 
-        sys.stderr = old
-        if blink_state:
-            pct[0] = 1.0
-            time.sleep(0.1)
+            # Collect segments into text
+            text = ""
+            for segment in segments:
+                text += segment.text
+                if blink_state:
+                    pct[0] = min(0.2 + (segment.end / 30.0) * 0.8, 1.0)
+                log(f'Segment: [{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}')
+
+            log(f'Transcription completed in {time.time()-t0:.2f}s')
+            log(f'Detected language: {info.language}')
+            log(f'Text length: {len(text)} chars')
+
+            if blink_state:
+                pct[0] = 1.0
+                time.sleep(0.1)
+
+            # Return dict compatible with openai-whisper format
+            return {'text': text, 'language': info.language}
+
+        else:
+            # Use standard openai-whisper
+            log(f'Loading Whisper model: {model}')
+
+            # Use preloaded model if available
+            if preloaded_model is not None:
+                m = preloaded_model
+                log('Using preloaded model')
+            else:
+                t0 = time.time()
+                m = whisper.load_model(model)
+                log(f'Model loaded in {time.time()-t0:.2f}s')
+
+            if blink_state:
+                while (blink_state[0] // 6) % 2 != 0:
+                    time.sleep(0.01)
+                pct[0] = 0.2
+
+            class P:
+                def write(self, txt):
+                    if verbose and txt.strip():
+                        print(f'[WHISPER] {txt.strip()}', file=sys.__stderr__)
+                    if '%' in txt and (x := re.search(r'(\d+)%', txt)):
+                        progress = int(x.group(1)) / 100.0
+                        if blink_state:
+                            pct[0] = 0.2 + progress * 0.8
+                        # Update status with progress
+                        write_status({
+                            'status': 'processing',
+                            'audio_level': 0.0,
+                            'pid': os.getpid(),
+                            'language': lang,
+                            'model': model,
+                            'timestamp': int(time.time()),
+                            'progress': progress,
+                            'duration': 0.0,
+                            'mode': 'processing',
+                            'transcription': None
+                        })
+                def flush(self): pass
+
+            old = sys.stderr
+            sys.stderr = P()
+
+            log(f'Starting transcription (language={lang})')
+            t0 = time.time()
+            r = m.transcribe(path, language=lang, fp16=False, verbose=False)
+            log(f'Transcription completed in {time.time()-t0:.2f}s')
+            log(f'Detected language: {r.get("language", "unknown")}')
+            log(f'Text length: {len(r["text"])} chars')
+
+            sys.stderr = old
+            if blink_state:
+                pct[0] = 1.0
+                time.sleep(0.1)
+
+            return r
+
     except Exception as e:
         log(f'Transcription error in transcribe(): {e}')
         write_status({
@@ -440,7 +503,21 @@ def transcribe(path, model, lang, run=None, blink_state=None):
     finally:
         time.sleep(0.05)
 
-    return r
+
+def preload_model(model_name, lang):
+    """Preload Whisper model for faster transcription"""
+    global preloaded_model
+
+    if fast_mode and FASTER_WHISPER_AVAILABLE:
+        log(f'Preloading faster-whisper model: {model_name}')
+        t0 = time.time()
+        preloaded_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        log(f'Model preloaded in {time.time()-t0:.2f}s')
+    else:
+        log(f'Preloading whisper model: {model_name}')
+        t0 = time.time()
+        preloaded_model = whisper.load_model(model_name)
+        log(f'Model preloaded in {time.time()-t0:.2f}s')
 
 
 def show_processing_animation(run, pct, blink_state, fullwidth):
@@ -477,6 +554,10 @@ def process_file(file_path, lang, mdl, codevoice):
         print(f'Warning: Large file ({file_size / (1024*1024):.1f}MB), transcription may take a while', file=sys.stderr)
 
     log(f'Processing file: {file_path} ({file_size} bytes)')
+
+    # Preload model if fast_mode enabled
+    if fast_mode:
+        preload_model(mdl, lang)
 
     # Show processing UI
     global pct
@@ -533,6 +614,10 @@ def process_recording(lang, mdl, sig_mode, codevoice):
             print(f'PID: {pid}  # Send SIGUSR1 to stop: kill -SIGUSR1 {pid}', file=sys.stderr)
 
     log(f'Starting listen (language={lang}, model={mdl})')
+
+    # Preload model if fast_mode enabled
+    if fast_mode:
+        preload_model(mdl, lang)
 
     global pct
     run = [True]
@@ -613,7 +698,7 @@ def main():
         return
 
     # Parse CLI arguments with argparse
-    global quiet_mode, json_mode, output_file, status_file
+    global quiet_mode, json_mode, output_file, status_file, fast_mode
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('-l', '--language', default=config.LANGUAGE)
     parser.add_argument('-m', '--model', default=config.MODEL)
@@ -626,6 +711,7 @@ def main():
     parser.add_argument('--signal-mode', action='store_true')
     parser.add_argument('--vad', type=float, metavar='SECONDS')
     parser.add_argument('--codevoice', action='store_true')
+    parser.add_argument('--fast-mode', action='store_true')
 
     args = parser.parse_args()
 
@@ -642,6 +728,12 @@ def main():
     vad_enabled = args.vad is not None
     vad_silence_duration = args.vad if args.vad else config.VAD_DEFAULT_DURATION
     codevoice_mode = args.codevoice
+    fast_mode = args.fast_mode
+
+    # Check if fast_mode is enabled but faster-whisper is not available
+    if fast_mode and not FASTER_WHISPER_AVAILABLE:
+        print('Error: --fast-mode requires faster-whisper. Install with: pip install faster-whisper', file=sys.stderr)
+        sys.exit(1)
 
     # Route to appropriate mode
     if file_path:
