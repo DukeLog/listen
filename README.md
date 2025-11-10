@@ -159,7 +159,13 @@ curl -X POST -F "audio=@file.mp3" -F "language=es" http://localhost:5000/transcr
 
 ## models
 
-Available Whisper models (ordered by speed/accuracy tradeoff):
+### philosophy
+
+this project is committed to always using the **best open source language model** available at any given time. when a superior open source model emerges, we will update to it. currently, we use OpenAI Whisper as it represents the state-of-the-art in open source speech recognition.
+
+### available whisper models
+
+models ordered by speed/accuracy tradeoff:
 
 | model | size | speed | accuracy | use case |
 |-------|------|-------|----------|----------|
