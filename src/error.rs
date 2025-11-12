@@ -15,6 +15,7 @@ pub enum ListenError {
     Config(String),
 
     #[error("Signal error: {0}")]
+    #[allow(dead_code)]
     Signal(String),
 }
 

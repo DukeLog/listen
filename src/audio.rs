@@ -3,7 +3,6 @@ use crate::error::{ListenError, Result};
 use crate::transcribe;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
-use std::io::Write;
 
 pub async fn record_and_transcribe(config: &Config) -> Result<()> {
     if !config.quiet {

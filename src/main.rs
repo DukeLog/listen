@@ -4,6 +4,9 @@ mod config;
 mod transcribe;
 mod error;
 
+#[cfg(test)]
+mod tests;
+
 use clap::Parser;
 use anyhow::Result;
 
