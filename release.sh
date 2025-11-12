@@ -35,7 +35,7 @@ VERSION_NUM="${VERSION#v}"
 info "Starting release process for version $VERSION_NUM"
 
 # Verify we're in the listen repo
-if [ ! -f "listen.py" ]; then
+if [ ! -f "Cargo.toml" ]; then
     error "Must be run from the listen repository root"
 fi
 
@@ -93,10 +93,10 @@ sed -i.bak "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
 sed -i.bak "s/^sha256sums=.*/sha256sums=('$SHA256')/" PKGBUILD
 rm PKGBUILD.bak
 
-# Update version in listen.py
-info "Updating version in listen.py"
-sed -i.bak "s/^__version__ = .*/__version__ = '$VERSION_NUM'/" listen.py
-rm listen.py.bak
+# Update version in Cargo.toml
+info "Updating version in Cargo.toml"
+sed -i.bak "s/^version = \".*\"/version = \"$VERSION_NUM\"/" Cargo.toml
+rm Cargo.toml.bak
 
 # Update Termux build.sh
 info "Updating termux/build.sh"
@@ -116,7 +116,7 @@ fi
 
 # Commit AUR changes
 info "Committing package changes"
-git add PKGBUILD .SRCINFO listen.py termux/build.sh
+git add PKGBUILD .SRCINFO Cargo.toml termux/build.sh
 git commit -m "Bump version to $VERSION_NUM
 
 $RELEASE_NOTES"
