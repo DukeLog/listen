@@ -3,7 +3,7 @@ use crate::error::{ListenError, Result};
 use serde::{Deserialize, Serialize};
 
 /// Audio configuration constants
-pub const SAMPLE_RATE: u32 = 16000;
+pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u16 = 1;
 pub const VAD_DEFAULT_DURATION: f32 = 2.0;
 pub const VAD_THRESHOLD: f32 = 0.02;

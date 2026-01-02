@@ -84,8 +84,19 @@ fn record_audio(config: &Config) -> Result<Vec<f32>> {
     let samples = recorded_samples.lock().unwrap().clone();
 
     if config.verbose {
-        println!("[DEBUG] Recorded {} samples", samples.len());
+        println!("[DEBUG] Recorded {} samples at {}Hz", samples.len(), config.sample_rate);
     }
+
+    // Resample to 16000 Hz for Whisper if needed
+    let samples = if config.sample_rate != 16000 {
+        let resampled = resample_to_16khz(&samples, config.sample_rate);
+        if config.verbose {
+            println!("[DEBUG] Resampled to {} samples at 16000Hz", resampled.len());
+        }
+        resampled
+    } else {
+        samples
+    };
 
     Ok(samples)
 }
@@ -138,4 +149,30 @@ fn output_transcription(text: &str, config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resample audio from source_rate to 16000 Hz using linear interpolation
+fn resample_to_16khz(samples: &[f32], source_rate: u32) -> Vec<f32> {
+    const TARGET_RATE: u32 = 16000;
+
+    if source_rate == TARGET_RATE {
+        return samples.to_vec();
+    }
+
+    let ratio = source_rate as f64 / TARGET_RATE as f64;
+    let output_len = (samples.len() as f64 / ratio) as usize;
+    let mut output = Vec::with_capacity(output_len);
+
+    for i in 0..output_len {
+        let src_idx = i as f64 * ratio;
+        let idx_floor = src_idx.floor() as usize;
+        let idx_ceil = (idx_floor + 1).min(samples.len() - 1);
+        let frac = src_idx - idx_floor as f64;
+
+        // Linear interpolation
+        let sample = samples[idx_floor] as f64 * (1.0 - frac) + samples[idx_ceil] as f64 * frac;
+        output.push(sample as f32);
+    }
+
+    output
 }
